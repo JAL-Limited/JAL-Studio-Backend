@@ -33,7 +33,17 @@ function createApp(options = {}) {
   const allowedOrigins = env.CORS_ORIGINS.split(',').map((origin) => origin.trim());
   app.use(cors({
     origin(origin, callback) {
-      if (!origin || allowedOrigins.includes(origin)) {
+      let isLocalDevelopmentOrigin = false;
+      if (origin && env.NODE_ENV !== 'production') {
+        try {
+          const parsedOrigin = new URL(origin);
+          isLocalDevelopmentOrigin = parsedOrigin.protocol === 'http:'
+            && ['localhost', '127.0.0.1', '[::1]'].includes(parsedOrigin.hostname);
+        } catch {
+          isLocalDevelopmentOrigin = false;
+        }
+      }
+      if (!origin || allowedOrigins.includes(origin) || isLocalDevelopmentOrigin) {
         callback(null, true);
         return;
       }

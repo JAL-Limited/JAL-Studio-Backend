@@ -37,6 +37,14 @@ test('CORS allows configured app origins and withholds headers from other sites'
     .get('/api/v1/health')
     .set('Origin', 'http://localhost:8765');
   assert.equal(allowed.headers['access-control-allow-origin'], 'http://localhost:8765');
+  const flutterDevPort = await request(app)
+    .get('/api/v1/health')
+    .set('Origin', 'http://localhost:50123');
+  assert.equal(flutterDevPort.headers['access-control-allow-origin'], 'http://localhost:50123');
+  const loopbackAddress = await request(app)
+    .get('/api/v1/health')
+    .set('Origin', 'http://127.0.0.1:50123');
+  assert.equal(loopbackAddress.headers['access-control-allow-origin'], 'http://127.0.0.1:50123');
   const response = await request(app)
     .get('/api/v1/health')
     .set('Origin', 'https://app.example.com');

@@ -22,7 +22,10 @@ required values are:
 - `PAYSTACK_SECRET_KEY`: Paystack **test secret key** (`sk_test_...`) for
   local test transactions. Keep it on this Node server only.
 - `CORS_ORIGINS`: comma-separated allowed web origins. Native Flutter apps do
-  not send a browser Origin header; add the deployed web app origin for web.
+  not send a browser Origin header. In development, HTTP loopback origins
+  (`localhost`, `127.0.0.1`, or `[::1]`) are allowed on any port for Flutter's
+  local web server. Production requires the deployed web app origin to be
+  listed explicitly.
 
 Start and seed the API:
 
