@@ -1,0 +1,26 @@
+services:
+  mongo:
+    image: mongo:8
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - eko-mongo-data:/data/db
+
+  api:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      MONGODB_URI: mongodb://mongo:27017/eko_store
+      NODE_ENV: production
+    ports:
+      - "4000:4000"
+    depends_on:
+      - mongo
+
+volumes:
+  eko-mongo-data:
