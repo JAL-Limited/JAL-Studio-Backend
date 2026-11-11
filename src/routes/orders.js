@@ -11,7 +11,7 @@ const checkoutSchema = z.object({ addressId: objectId }).strict();
 const cancellationSchema = z.object({ reason: z.string().trim().min(3).max(500) }).strict();
 const returnSchema = z.object({ reason: z.string().trim().min(3).max(1000) }).strict();
 
-function createOrdersRouter({ requireAuth, requireRole, paystack }) {
+function createOrdersRouter({ requireAuth, requireRole, paystack, deliveryKobo }) {
   const router = Router();
   router.use(requireAuth);
 
@@ -47,7 +47,12 @@ function createOrdersRouter({ requireAuth, requireRole, paystack }) {
         };
       });
       const subtotalKobo = items.reduce((total, item) => total + item.unitPriceKobo * item.quantity, 0);
-      const deliveryKobo = 1500000;
+      const sellerIds = [...new Set(items.map((item) => item.seller?.toString()).filter(Boolean))];
+      const sellerFulfillments = sellerIds.map((seller) => ({
+        seller,
+        status: 'pending_payment',
+        updatedAt: new Date(),
+      }));
       const order = await Order.create({
         user: request.user.id,
         checkoutKey,
@@ -58,6 +63,7 @@ function createOrdersRouter({ requireAuth, requireRole, paystack }) {
         totalKobo: subtotalKobo + deliveryKobo,
         paymentProvider: 'paystack',
         shippingAddress: address.toObject(),
+        sellerFulfillments,
       });
 
       response.status(201).json({
@@ -149,7 +155,13 @@ function createOrdersRouter({ requireAuth, requireRole, paystack }) {
         );
       }
       order.cancellationReason = reason;
-      if (order.status === 'pending_payment') order.status = 'cancelled';
+      if (order.status === 'pending_payment') {
+        order.status = 'cancelled';
+        order.sellerFulfillments.forEach((fulfillment) => {
+          fulfillment.status = 'cancelled';
+          fulfillment.updatedAt = new Date();
+        });
+      }
       await order.save();
       response.json({
         data: order,
@@ -181,8 +193,17 @@ function createOrdersRouter({ requireAuth, requireRole, paystack }) {
     asyncHandler(async (request, response) => {
       const orders = await Order.find({
         'items.seller': request.user.role === 'admin' ? { $exists: true } : request.user.id,
-      }).populate('user', 'fullName email').sort({ createdAt: -1 }).lean();
-      response.json({ data: orders });
+      }).populate('user', 'fullName email').sort({ createdAt: -1 });
+      for (const order of orders) {
+        initializeSellerFulfillments(order);
+        if (order.isModified('sellerFulfillments')) await order.save();
+      }
+      const data = orders.map((order) => {
+        const serialized = order.toObject();
+        if (request.user.role === 'admin') return serialized;
+        return sellerOrderResponse(order, request.user.id);
+      });
+      response.json({ data });
     }),
   );
 
@@ -194,22 +215,33 @@ function createOrdersRouter({ requireAuth, requireRole, paystack }) {
       const input = z.object({ status: z.enum(['processing', 'shipped', 'delivered']) }).strict().parse(request.body);
       const order = await Order.findById(orderId);
       if (!order) throw new ApiError(404, 'Order not found');
-      const isSellerOrder = order.items.some(
-        (item) => item.seller?.toString() === request.user.id,
-      );
-      if (request.user.role !== 'admin' && !isSellerOrder) throw new ApiError(404, 'Order not found');
-      if (order.status === 'pending_payment') throw new ApiError(409, 'Paid orders cannot be fulfilled');
-      const nextStatus = {
-        paid: 'processing',
-        processing: 'shipped',
-        shipped: 'delivered',
-      }[order.status];
-      if (nextStatus !== input.status) {
-        throw new ApiError(409, `Order cannot move from ${order.status} to ${input.status}`);
+      initializeSellerFulfillments(order);
+      if (order.isModified('sellerFulfillments')) await order.save();
+      if (request.user.role === 'admin') {
+        const nextStatus = nextFulfillmentStatus(order.status);
+        if (nextStatus !== input.status) {
+          throw new ApiError(409, `Order cannot move from ${order.status} to ${input.status}`);
+        }
+        advanceSellerFulfillments(order, input.status);
+      } else {
+        const fulfillment = order.sellerFulfillments.find(
+          (entry) => entry.seller.toString() === request.user.id,
+        );
+        if (!fulfillment) throw new ApiError(404, 'Order not found');
+        const nextStatus = nextFulfillmentStatus(fulfillment.status);
+        if (nextStatus !== input.status) {
+          throw new ApiError(409, `Your items cannot move from ${fulfillment.status} to ${input.status}`);
+        }
+        fulfillment.status = input.status;
+        fulfillment.updatedAt = new Date();
+        order.status = aggregateFulfillmentStatus(order.sellerFulfillments);
       }
-      order.status = input.status;
       await order.save();
-      response.json({ data: order });
+      response.json({
+        data: request.user.role === 'admin'
+          ? order
+          : sellerOrderResponse(order, request.user.id),
+      });
     }),
   );
 
@@ -233,6 +265,11 @@ function createOrdersRouter({ requireAuth, requireRole, paystack }) {
             throw new ApiError(409, 'Verify the payment result before cancelling this order');
           }
           order.status = 'cancelled';
+          initializeSellerFulfillments(order);
+          order.sellerFulfillments.forEach((fulfillment) => {
+            fulfillment.status = 'cancelled';
+            fulfillment.updatedAt = new Date();
+          });
         } else if (input.status !== 'cancelled') {
           const nextStatus = {
             paid: 'processing',
@@ -242,7 +279,8 @@ function createOrdersRouter({ requireAuth, requireRole, paystack }) {
           if (nextStatus !== input.status) {
             throw new ApiError(409, `Order cannot move from ${order.status} to ${input.status}`);
           }
-          order.status = input.status;
+          initializeSellerFulfillments(order);
+          advanceSellerFulfillments(order, input.status);
         } else {
           throw new ApiError(409, 'Paid-order cancellation requires a separately verified refund process');
         }
@@ -303,9 +341,77 @@ async function markPaid(order, transaction) {
   if (order.status !== 'pending_payment') return order;
   order.status = 'paid';
   order.paymentPaidAt = new Date();
+  initializeSellerFulfillments(order);
+  order.sellerFulfillments.forEach((fulfillment) => {
+    fulfillment.status = 'paid';
+    fulfillment.updatedAt = order.paymentPaidAt;
+  });
   await order.save();
   await Cart.updateOne({ user: order.user }, { $set: { items: [] } });
   return order;
+}
+
+function initializeSellerFulfillments(order) {
+  if (order.sellerFulfillments.length) return;
+  const sellerIds = [...new Set(
+    order.items.map((item) => item.seller?.toString()).filter(Boolean),
+  )];
+  if (!sellerIds.length) return;
+  const status = order.status === 'pending_payment' ? 'pending_payment' : order.status;
+  if (!['pending_payment', 'paid', 'processing', 'shipped', 'delivered'].includes(status)) return;
+  order.sellerFulfillments = sellerIds.map((seller) => ({
+    seller,
+    status,
+    updatedAt: order.updatedAt || order.createdAt || new Date(),
+  }));
+}
+
+function nextFulfillmentStatus(status) {
+  return {
+    paid: 'processing',
+    processing: 'shipped',
+    shipped: 'delivered',
+  }[status];
+}
+
+function aggregateFulfillmentStatus(fulfillments) {
+  const rank = { paid: 0, processing: 1, shipped: 2, delivered: 3 };
+  const aggregate = Math.min(...fulfillments.map((fulfillment) => rank[fulfillment.status]));
+  return ['paid', 'processing', 'shipped', 'delivered'][aggregate];
+}
+
+function advanceSellerFulfillments(order, targetStatus) {
+  const rank = { paid: 0, processing: 1, shipped: 2, delivered: 3 };
+  order.sellerFulfillments.forEach((fulfillment) => {
+    if (rank[fulfillment.status] < rank[targetStatus]) {
+      fulfillment.status = targetStatus;
+      fulfillment.updatedAt = new Date();
+    }
+  });
+  order.status = order.sellerFulfillments.length
+    ? aggregateFulfillmentStatus(order.sellerFulfillments)
+    : targetStatus;
+}
+
+function sellerOrderResponse(order, sellerId) {
+  const serialized = order.toObject();
+  const items = serialized.items.filter(
+    (item) => item.seller?.toString() === sellerId,
+  );
+  const fulfillment = order.sellerFulfillments.find(
+    (entry) => entry.seller.toString() === sellerId,
+  );
+  return {
+    ...serialized,
+    items,
+    sellerStatus: order.status === 'cancelled'
+      ? 'cancelled'
+      : fulfillment?.status ?? order.status,
+    sellerSubtotalKobo: items.reduce(
+      (total, item) => total + item.unitPriceKobo * item.quantity,
+      0,
+    ),
+  };
 }
 
 module.exports = { createOrdersRouter, markPaid };

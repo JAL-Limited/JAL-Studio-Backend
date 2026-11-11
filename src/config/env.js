@@ -9,6 +9,7 @@ const envSchema = z.object({
   API_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(900000),
   API_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(300),
   AUTH_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(20),
+  DELIVERY_FEE_KOBO: z.coerce.number().int().nonnegative().safe().default(1500000),
   PAYSTACK_SECRET_KEY: z.string().optional(),
   PAYSTACK_CALLBACK_URL: z.string().url().default('https://standard.paystack.co/close'),
   CORS_ORIGINS: z.string().default('http://localhost:3000,http://localhost:8080,http://localhost:8765'),

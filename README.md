@@ -66,6 +66,28 @@ The API never stores card numbers or CVVs. Refunds, escrow, courier labels, and
 seller settlements still require separately selected providers and approved
 business policies.
 
+The delivery fee is configured in kobo with `DELIVERY_FEE_KOBO` (default
+`1500000`, or NGN 15,000). Checkout reads the fee from the API, which also
+calculates the authoritative order total. This is a flat fee, not a courier
+quote or zone-based delivery integration.
+
+## Seller product photos
+
+Approved sellers can submit a JPEG, PNG, or WebP product image (up to 5 MB)
+with each new listing. The API validates the image signature and stores its
+bytes in MongoDB GridFS; public image URLs are served by
+`/api/v1/media/products/:imageId`. No separate disk volume or image-hosting
+credential is required, but the MongoDB deployment must have sufficient
+storage and these API changes must be deployed before uploads are available.
+
+## Seller fulfilment
+
+Each seller sees only their own items in a multi-seller order and updates those
+items through `paid → processing → shipped → delivered`. The customer's
+order-level status advances only when every seller reaches that stage. These
+are seller-reported updates; courier tracking and delivery confirmation are
+not integrated.
+
 ## API/test commands
 
 ```powershell

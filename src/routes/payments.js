@@ -3,11 +3,13 @@ const Order = require('../models/order');
 const { asyncHandler } = require('../utils/async-handler');
 const { markPaid } = require('./orders');
 
-function createPaymentsRouter({ paystack }) {
+function createPaymentsRouter({ paystack, deliveryKobo }) {
   const router = Router();
 
   router.get('/config', (_request, response) => {
-    response.json({ data: { paystackEnabled: paystack.isConfigured } });
+    response.json({
+      data: { paystackEnabled: paystack.isConfigured, deliveryKobo },
+    });
   });
 
   router.post(

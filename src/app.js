@@ -15,6 +15,7 @@ const { createOrdersRouter } = require('./routes/orders');
 const { createPaymentsRouter } = require('./routes/payments');
 const { createProductsRouter } = require('./routes/products');
 const { createReviewsRouter } = require('./routes/reviews');
+const { createMediaRouter } = require('./routes/media');
 const { createPaystackService } = require('./services/paystack');
 const { createSellerRouter } = require('./routes/seller');
 const { createSupportRouter } = require('./routes/support');
@@ -52,7 +53,10 @@ function createApp(options = {}) {
   }));
   const paystack = options.paystack || createPaystackService(env, options.fetchImpl);
   app.use('/api/v1/payments', express.raw({ type: 'application/json', limit: '32kb' }));
-  app.use('/api/v1/payments', createPaymentsRouter({ paystack }));
+  app.use(
+    '/api/v1/payments',
+    createPaymentsRouter({ paystack, deliveryKobo: env.DELIVERY_FEE_KOBO }),
+  );
   app.use(express.json({ limit: '32kb' }));
   app.use('/media', express.static(path.resolve(__dirname, '../../assets/images'), {
     fallthrough: false,
@@ -82,12 +86,21 @@ function createApp(options = {}) {
   });
   const { requireAuth, requireRole } = createAuthMiddleware(env);
   app.use('/api/v1', apiLimiter);
+  app.use('/api/v1/media', createMediaRouter());
   app.use('/api/v1/auth', createAuthRouter({ env, requireAuth, authLimiter }));
   app.use('/api/v1', createReviewsRouter({ requireAuth }));
   app.use('/api/v1/products', createProductsRouter({ requireAuth, requireRole }));
   app.use('/api/v1/account', createAccountRouter({ requireAuth }));
   app.use('/api/v1/cart', createCartRouter({ requireAuth }));
-  app.use('/api/v1/orders', createOrdersRouter({ requireAuth, requireRole, paystack }));
+  app.use(
+    '/api/v1/orders',
+    createOrdersRouter({
+      requireAuth,
+      requireRole,
+      paystack,
+      deliveryKobo: env.DELIVERY_FEE_KOBO,
+    }),
+  );
   app.use('/api/v1/seller', createSellerRouter({ requireAuth, requireRole }));
   app.use('/api/v1/support', createSupportRouter({ requireAuth, requireRole }));
 

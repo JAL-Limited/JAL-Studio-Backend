@@ -27,6 +27,17 @@ const orderSchema = new mongoose.Schema(
         color: String,
       },
     ],
+    sellerFulfillments: [
+      {
+        seller: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+        status: {
+          type: String,
+          enum: ['pending_payment', 'paid', 'processing', 'shipped', 'delivered', 'cancelled'],
+          required: true,
+        },
+        updatedAt: { type: Date, required: true },
+      },
+    ],
     subtotalKobo: { type: Number, required: true, min: 0 },
     deliveryKobo: { type: Number, required: true, min: 0 },
     totalKobo: { type: Number, required: true, min: 0 },

@@ -1,5 +1,7 @@
 const { Router } = require('express');
+const multer = require('multer');
 const Product = require('../models/product');
+const { deleteProductImage, saveProductImage } = require('../services/product-images');
 const { ApiError } = require('../utils/api-error');
 const { asyncHandler } = require('../utils/async-handler');
 const { z } = require('../utils/validators');
@@ -31,6 +33,44 @@ const productSchema = z.object({
   styles: z.array(z.string().trim().min(1).max(40)).max(30).default([]),
   stock: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
 }).strict();
+const productDetailsSchema = productSchema.omit({ imageUrl: true });
+const productImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 5 * 1024 * 1024,
+    files: 1,
+    fields: 1,
+    fieldSize: 32 * 1024,
+  },
+});
+
+function parseProductUpload(request, _response, next) {
+  productImageUpload.single('image')(request, _response, (error) => {
+    if (error) {
+      if (error.code === 'LIMIT_FILE_SIZE') {
+        return next(new ApiError(413, 'Product images must be 5 MB or smaller'));
+      }
+      return next(new ApiError(400, 'Could not read the selected product image'));
+    }
+    next();
+  });
+}
+
+function readProductDetails(request) {
+  if (!request.is('multipart/form-data')) return productSchema.parse(request.body);
+  if (!request.file) throw new ApiError(400, 'Choose a product image to continue');
+  if (typeof request.body.product !== 'string') {
+    throw new ApiError(400, 'Product details are missing');
+  }
+
+  let product;
+  try {
+    product = JSON.parse(request.body.product);
+  } catch {
+    throw new ApiError(400, 'Product details are invalid');
+  }
+  return productDetailsSchema.parse(product);
+}
 
 function createProductsRouter({ requireAuth, requireRole }) {
   const router = Router();
@@ -89,9 +129,35 @@ function createProductsRouter({ requireAuth, requireRole }) {
 
   router.post(
     '/seller',
+    parseProductUpload,
     asyncHandler(async (request, response) => {
-      const input = productSchema.parse(request.body);
-      const product = await Product.create({ ...input, seller: request.user.id });
+      const input = readProductDetails(request);
+      let imageUrl = input.imageUrl;
+      let imageId;
+      if (request.file) {
+        imageId = await saveProductImage(request.file.buffer, request.user.id);
+        imageUrl = `/api/v1/media/products/${imageId}`;
+      }
+      let product;
+      try {
+        product = await Product.create({
+          ...input,
+          imageUrl,
+          seller: request.user.id,
+        });
+      } catch (error) {
+        if (imageId) {
+          try {
+            await deleteProductImage(imageId);
+          } catch (cleanupError) {
+            console.error('Unable to clean up an unused product image', {
+              imageId,
+              error: cleanupError,
+            });
+          }
+        }
+        throw error;
+      }
       response.status(201).json({ data: product });
     }),
   );

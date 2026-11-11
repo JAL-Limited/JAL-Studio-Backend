@@ -33,6 +33,12 @@ test('health endpoint reports database readiness', async () => {
   assert.deepEqual(response.body, { status: 'ok', database: 'connected' });
 });
 
+test('checkout config shares the server delivery fee with the app', async () => {
+  const response = await request(app).get('/api/v1/payments/config');
+  assert.equal(response.status, 200);
+  assert.equal(response.body.data.deliveryKobo, 1500000);
+});
+
 test('CORS allows configured app origins and withholds headers from other sites', async () => {
   const allowed = await request(app)
     .get('/api/v1/health')
@@ -140,6 +146,73 @@ test('admin product management is role-protected and can hide or restore a listi
   assert.equal(restored.body.data.isActive, true);
 });
 
+test('seller product creation stores a selected image in database-backed media', async () => {
+  const anonymousUpload = await request(app)
+    .post('/api/v1/products/seller')
+    .field('product', '{}')
+    .attach('image', Buffer.from([0xff, 0xd8, 0xff]), {
+      filename: 'shirt.jpg',
+      contentType: 'image/jpeg',
+    });
+  assert.equal(anonymousUpload.status, 401);
+
+  const registration = await request(app).post('/api/v1/auth/register').send({
+    fullName: 'Product Seller',
+    email: 'product-seller@example.com',
+    password: 'a-secure-test-password',
+  });
+  const sellerAuth = {
+    Authorization: 'Bearer ' + registration.body.data.token,
+  };
+  await User.findByIdAndUpdate(registration.body.data.user.id, {
+    $set: { role: 'seller' },
+  });
+
+  const productDetails = {
+    slug: 'camera-ready-shirt',
+    name: 'Camera Ready Shirt',
+    brand: 'Seller Atelier',
+    priceKobo: 2500000,
+    stock: 5,
+    description: 'A crisp cotton shirt.',
+    category: 'menswear',
+    sizes: [],
+    colors: [],
+    styles: [],
+  };
+  const imageBytes = Buffer.from([
+    0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46,
+  ]);
+  const created = await request(app)
+    .post('/api/v1/products/seller')
+    .set(sellerAuth)
+    .field('product', JSON.stringify(productDetails))
+    .attach('image', imageBytes, {
+      filename: 'shirt.jpg',
+      contentType: 'image/jpeg',
+    });
+
+  assert.equal(created.status, 201);
+  assert.match(created.body.data.imageUrl, /^\/api\/v1\/media\/products\//);
+  const image = await request(app).get(created.body.data.imageUrl);
+  assert.equal(image.status, 200);
+  assert.equal(image.headers['content-type'], 'image/jpeg');
+  assert.deepEqual(image.body, imageBytes);
+
+  const unsupported = await request(app)
+    .post('/api/v1/products/seller')
+    .set(sellerAuth)
+    .field('product', JSON.stringify({
+      ...productDetails,
+      slug: 'bad-image-shirt',
+    }))
+    .attach('image', Buffer.from('not an image'), {
+      filename: 'shirt.txt',
+      contentType: 'text/plain',
+    });
+  assert.equal(unsupported.status, 400);
+});
+
 test('registration, authentication, and server-priced cart operations work', async () => {
   const registration = await request(app).post('/api/v1/auth/register').send({
     fullName: 'Test Customer',
@@ -219,8 +292,12 @@ test('Paystack checkout verifies the server-side amount and replays idempotently
       street: '1 Test Street',
       city: 'Lagos',
       state: 'Lagos',
+      latitude: 6.5244,
+      longitude: 3.3792,
     });
   assert.equal(address.status, 201);
+  assert.equal(address.body.data.latitude, 6.5244);
+  assert.equal(address.body.data.longitude, 3.3792);
 
   const product = await Product.findOne({ slug: 'test-blazer' });
   await request(paymentApp)
@@ -295,6 +372,105 @@ test('seller applications do not grant seller privileges without admin approval'
   assert.equal(application.body.data.status, 'pending');
   const denied = await request(app).get('/api/v1/products/seller').set(auth);
   assert.equal(denied.status, 403);
+});
+
+test('multi-seller orders keep fulfillment scoped to each seller', async () => {
+  const createSeller = async (name, email) => {
+    const registration = await request(app).post('/api/v1/auth/register').send({
+      fullName: name,
+      email,
+      password: 'a-secure-test-password',
+    });
+    await User.findByIdAndUpdate(registration.body.data.user.id, {
+      $set: { role: 'seller' },
+    });
+    return {
+      id: registration.body.data.user.id,
+      auth: { Authorization: `Bearer ${registration.body.data.token}` },
+    };
+  };
+  const sellerA = await createSeller('Seller A', 'seller-a-orders@example.com');
+  const sellerB = await createSeller('Seller B', 'seller-b-orders@example.com');
+  const sellerC = await createSeller('Seller C', 'seller-c-orders@example.com');
+  const customer = await User.create({
+    fullName: 'Marketplace Customer',
+    email: 'multi-seller-customer@example.com',
+    passwordHash: 'not-used-by-this-test',
+  });
+  const order = await Order.create({
+    user: customer.id,
+    orderNumber: 'EKO-MULTI-SELLER',
+    items: [
+      {
+        seller: sellerA.id,
+        name: 'Seller A jacket',
+        imageUrl: '/media/a.jpg',
+        unitPriceKobo: 100000,
+        quantity: 2,
+      },
+      {
+        seller: sellerB.id,
+        name: 'Seller B bag',
+        imageUrl: '/media/b.jpg',
+        unitPriceKobo: 50000,
+        quantity: 1,
+      },
+    ],
+    subtotalKobo: 250000,
+    deliveryKobo: 1500000,
+    totalKobo: 1750000,
+    shippingAddress: { city: 'Lagos' },
+    status: 'paid',
+  });
+  const statusUrl = `/api/v1/orders/seller/${order.id}/status`;
+
+  const sellerOrders = await request(app)
+    .get('/api/v1/orders/seller')
+    .set(sellerA.auth);
+  assert.equal(sellerOrders.status, 200);
+  assert.equal(sellerOrders.body.data[0].sellerStatus, 'paid');
+  assert.deepEqual(
+    sellerOrders.body.data[0].items.map((item) => item.name),
+    ['Seller A jacket'],
+  );
+  assert.equal(sellerOrders.body.data[0].sellerSubtotalKobo, 200000);
+
+  const unrelatedSeller = await request(app)
+    .patch(statusUrl)
+    .set(sellerC.auth)
+    .send({ status: 'processing' });
+  assert.equal(unrelatedSeller.status, 404);
+
+  const firstSellerProcessing = await request(app)
+    .patch(statusUrl)
+    .set(sellerA.auth)
+    .send({ status: 'processing' });
+  assert.equal(firstSellerProcessing.status, 200);
+  assert.equal(firstSellerProcessing.body.data.status, 'paid');
+  assert.equal(firstSellerProcessing.body.data.sellerStatus, 'processing');
+  assert.equal(firstSellerProcessing.body.data.items.length, 1);
+
+  const secondSellerProcessing = await request(app)
+    .patch(statusUrl)
+    .set(sellerB.auth)
+    .send({ status: 'processing' });
+  assert.equal(secondSellerProcessing.status, 200);
+  assert.equal(secondSellerProcessing.body.data.status, 'processing');
+
+  await request(app)
+    .patch(statusUrl)
+    .set(sellerA.auth)
+    .send({ status: 'shipped' })
+    .expect(200);
+  const stillProcessing = await Order.findById(order.id);
+  assert.equal(stillProcessing.status, 'processing');
+
+  const secondSellerShipped = await request(app)
+    .patch(statusUrl)
+    .set(sellerB.auth)
+    .send({ status: 'shipped' });
+  assert.equal(secondSellerShipped.status, 200);
+  assert.equal(secondSellerShipped.body.data.status, 'shipped');
 });
 
 test('admin can decide a return request without changing the order fulfilment state', async () => {
