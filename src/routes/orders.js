@@ -219,25 +219,33 @@ function createOrdersRouter({ requireAuth, requireRole, paystack }) {
     asyncHandler(async (request, response) => {
       const orderId = objectId.parse(request.params.orderId);
       const input = z.object({
-        status: z.enum(['processing', 'shipped', 'delivered', 'cancelled']),
+        status: z.enum(['processing', 'shipped', 'delivered', 'cancelled']).optional(),
         returnStatus: z.enum(['approved', 'rejected']).optional(),
       }).strict().parse(request.body);
+      if (!input.status && !input.returnStatus) {
+        throw new ApiError(400, 'Provide an order status or return decision');
+      }
       const order = await Order.findById(orderId);
       if (!order) throw new ApiError(404, 'Order not found');
-      if (input.status === 'cancelled' && order.status === 'pending_payment') {
-        order.status = 'cancelled';
-      } else if (input.status !== 'cancelled') {
-        const nextStatus = {
-          paid: 'processing',
-          processing: 'shipped',
-          shipped: 'delivered',
-        }[order.status];
-        if (nextStatus !== input.status) {
-          throw new ApiError(409, `Order cannot move from ${order.status} to ${input.status}`);
+      if (input.status) {
+        if (input.status === 'cancelled' && order.status === 'pending_payment') {
+          if (order.paymentReference) {
+            throw new ApiError(409, 'Verify the payment result before cancelling this order');
+          }
+          order.status = 'cancelled';
+        } else if (input.status !== 'cancelled') {
+          const nextStatus = {
+            paid: 'processing',
+            processing: 'shipped',
+            shipped: 'delivered',
+          }[order.status];
+          if (nextStatus !== input.status) {
+            throw new ApiError(409, `Order cannot move from ${order.status} to ${input.status}`);
+          }
+          order.status = input.status;
+        } else {
+          throw new ApiError(409, 'Paid-order cancellation requires a separately verified refund process');
         }
-        order.status = input.status;
-      } else {
-        throw new ApiError(409, 'Paid-order cancellation requires a separately verified refund process');
       }
       if (input.returnStatus) {
         if (!order.returnRequest) throw new ApiError(409, 'This order has no return request');

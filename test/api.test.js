@@ -7,6 +7,7 @@ const { createApp } = require('../src/app');
 const Cart = require('../src/models/cart');
 const Order = require('../src/models/order');
 const Product = require('../src/models/product');
+const User = require('../src/models/user');
 
 process.env.NODE_ENV = 'test';
 process.env.JWT_SECRET = 'test-only-secret-that-is-long-enough-123456';
@@ -91,6 +92,52 @@ test('catalog is public, paginated, searchable, and validates its query', async 
     '/api/v1/products?minPriceKobo=2000000&maxPriceKobo=1000000',
   );
   assert.equal(invertedPrice.status, 400);
+});
+
+test('admin product management is role-protected and can hide or restore a listing', async () => {
+  const registration = await request(app).post('/api/v1/auth/register').send({
+    fullName: 'Marketplace Admin',
+    email: 'marketplace-admin@example.com',
+    password: 'a-secure-test-password',
+  });
+  const adminUserId = registration.body.data.user.id;
+  await User.findByIdAndUpdate(adminUserId, { $set: { role: 'admin' } });
+  const adminAuth = { Authorization: `Bearer ${registration.body.data.token}` };
+
+  const customer = await request(app).post('/api/v1/auth/register').send({
+    fullName: 'Regular Customer',
+    email: 'regular-customer@example.com',
+    password: 'a-secure-test-password',
+  });
+  const customerAuth = { Authorization: `Bearer ${customer.body.data.token}` };
+  const denied = await request(app)
+    .get('/api/v1/products/admin')
+    .set(customerAuth);
+  assert.equal(denied.status, 403);
+
+  const listed = await request(app)
+    .get('/api/v1/products/admin')
+    .set(adminAuth);
+  assert.equal(listed.status, 200);
+  assert.ok(listed.body.data.length >= 2);
+
+  const product = await Product.findOne({ slug: 'test-blazer' });
+  const hidden = await request(app)
+    .patch(`/api/v1/products/admin/${product.id}/status`)
+    .set(adminAuth)
+    .send({ isActive: false });
+  assert.equal(hidden.status, 200);
+  assert.equal(hidden.body.data.isActive, false);
+  assert.equal(
+    (await request(app).get('/api/v1/products/test-blazer')).status,
+    404,
+  );
+  const restored = await request(app)
+    .patch(`/api/v1/products/admin/${product.id}/status`)
+    .set(adminAuth)
+    .send({ isActive: true });
+  assert.equal(restored.status, 200);
+  assert.equal(restored.body.data.isActive, true);
 });
 
 test('registration, authentication, and server-priced cart operations work', async () => {
@@ -248,6 +295,45 @@ test('seller applications do not grant seller privileges without admin approval'
   assert.equal(application.body.data.status, 'pending');
   const denied = await request(app).get('/api/v1/products/seller').set(auth);
   assert.equal(denied.status, 403);
+});
+
+test('admin can decide a return request without changing the order fulfilment state', async () => {
+  const registration = await request(app).post('/api/v1/auth/register').send({
+    fullName: 'Return Admin',
+    email: 'return-admin@example.com',
+    password: 'a-secure-test-password',
+  });
+  await User.findByIdAndUpdate(registration.body.data.user.id, {
+    $set: { role: 'admin' },
+  });
+  const auth = { Authorization: `Bearer ${registration.body.data.token}` };
+  const customer = await User.create({
+    fullName: 'Return Customer',
+    email: 'return-customer@example.com',
+    passwordHash: 'not-used-by-this-test',
+  });
+  const order = await Order.create({
+    user: customer.id,
+    orderNumber: 'EKO-RETURN-TEST',
+    items: [],
+    subtotalKobo: 0,
+    deliveryKobo: 0,
+    totalKobo: 0,
+    shippingAddress: { city: 'Lagos' },
+    status: 'delivered',
+    returnRequest: {
+      reason: 'Item arrived damaged',
+      status: 'requested',
+      requestedAt: new Date(),
+    },
+  });
+  const response = await request(app)
+    .patch(`/api/v1/orders/${order.id}/admin-status`)
+    .set(auth)
+    .send({ returnStatus: 'approved' });
+  assert.equal(response.status, 200);
+  assert.equal(response.body.data.status, 'delivered');
+  assert.equal(response.body.data.returnRequest.status, 'approved');
 });
 
 test('Paystack requires a secret key and signs webhooks with a timing-safe HMAC', async () => {

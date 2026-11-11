@@ -9,6 +9,8 @@ const addressSchema = new mongoose.Schema(
     city: { type: String, required: true, trim: true, maxlength: 100 },
     state: { type: String, required: true, trim: true, maxlength: 100 },
     postalCode: { type: String, trim: true, maxlength: 20 },
+    latitude: { type: Number, min: -90, max: 90 },
+    longitude: { type: Number, min: -180, max: 180 },
     isDefault: { type: Boolean, default: false },
   },
   { _id: true },

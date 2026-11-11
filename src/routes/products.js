@@ -106,6 +106,36 @@ function createProductsRouter({ requireAuth, requireRole }) {
   );
 
   router.get(
+    '/admin',
+    requireAuth,
+    requireRole('admin'),
+    asyncHandler(async (_request, response) => {
+      const products = await Product.find()
+        .populate('seller', 'fullName email')
+        .sort({ updatedAt: -1 })
+        .lean();
+      response.json({ data: products });
+    }),
+  );
+
+  router.patch(
+    '/admin/:productId/status',
+    requireAuth,
+    requireRole('admin'),
+    asyncHandler(async (request, response) => {
+      const productId = z.string().regex(/^[a-f\d]{24}$/i).parse(request.params.productId);
+      const { isActive } = z.object({ isActive: z.boolean() }).strict().parse(request.body);
+      const product = await Product.findByIdAndUpdate(
+        productId,
+        { $set: { isActive } },
+        { new: true, runValidators: true },
+      );
+      if (!product) throw new ApiError(404, 'Product not found');
+      response.json({ data: product });
+    }),
+  );
+
+  router.get(
     '/:idOrSlug',
     asyncHandler(async (request, response) => {
       const value = request.params.idOrSlug;
