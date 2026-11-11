@@ -7,6 +7,17 @@ const { asyncHandler } = require('../utils/async-handler');
 const { email, password, z } = require('../utils/validators');
 const { hashPassword, verifyPassword } = require('../utils/password');
 
+const passwordChangeSchema = z.object({
+  currentPassword: z.string().min(1).max(128),
+  newPassword: password,
+}).strict();
+const passwordResetRequestSchema = z.object({ email }).strict();
+const passwordResetConfirmSchema = z.object({
+  email,
+  code: z.string().trim().min(20).max(100),
+  password,
+}).strict();
+
 const registerSchema = z.object({
   fullName: z.string().trim().min(2).max(100),
   email,
@@ -29,7 +40,13 @@ function publicUser(user) {
   };
 }
 
-function createAuthRouter({ env, requireAuth, authLimiter }) {
+function createAuthRouter({
+  env,
+  requireAuth,
+  authLimiter,
+  passwordResetLimiter,
+  passwordResetEmail,
+}) {
   const router = Router();
 
   router.post(
@@ -44,11 +61,7 @@ function createAuthRouter({ env, requireAuth, authLimiter }) {
         phone: input.phone,
         passwordHash,
       });
-      const token = jwt.sign(
-        { sub: user.id, role: user.role },
-        env.JWT_SECRET,
-        { expiresIn: env.JWT_EXPIRES_IN, issuer: 'eko-store-api', audience: 'eko-store-app' },
-      );
+      const token = signAccessToken(user, env);
       response.status(201).json({ data: { user: publicUser(user), token } });
     }),
   );
@@ -61,12 +74,120 @@ function createAuthRouter({ env, requireAuth, authLimiter }) {
       const user = await User.findOne({ email: input.email }).select('+passwordHash');
       const isValid = user && (await verifyPassword(input.password, user.passwordHash));
       if (!isValid) throw new ApiError(401, 'Email or password is incorrect');
-      const token = jwt.sign(
-        { sub: user.id, role: user.role },
-        env.JWT_SECRET,
-        { expiresIn: env.JWT_EXPIRES_IN, issuer: 'eko-store-api', audience: 'eko-store-app' },
-      );
+      const token = signAccessToken(user, env);
       response.json({ data: { user: publicUser(user), token } });
+    }),
+  );
+
+  router.post(
+    '/password',
+    requireAuth,
+    authLimiter,
+    asyncHandler(async (request, response) => {
+      const input = passwordChangeSchema.parse(request.body);
+      if (input.currentPassword === input.newPassword) {
+        throw new ApiError(400, 'Choose a new password different from your current one');
+      }
+      const user = await User.findById(request.user.id).select('+passwordHash');
+      if (!user || !(await verifyPassword(input.currentPassword, user.passwordHash))) {
+        throw new ApiError(400, 'Current password is incorrect');
+      }
+      user.passwordHash = await hashPassword(input.newPassword);
+      user.tokenVersion += 1;
+      user.passwordResetTokenHash = undefined;
+      user.passwordResetExpiresAt = undefined;
+      user.passwordResetAttempts = 0;
+      await user.save();
+      response.json({
+        data: {
+          token: signAccessToken(user, env),
+          message: 'Password changed. Other active sessions have been signed out.',
+        },
+      });
+    }),
+  );
+
+  router.post(
+    '/password-reset/request',
+    passwordResetLimiter,
+    asyncHandler(async (request, response) => {
+      const input = passwordResetRequestSchema.parse(request.body);
+      if (!passwordResetEmail?.isConfigured) {
+        throw new ApiError(503, 'Password reset email is not configured on the server');
+      }
+      const user = await User.findOne({ email: input.email });
+      if (user) {
+        const code = crypto.randomBytes(24).toString('base64url');
+        user.passwordResetTokenHash = hashResetCode(code);
+        user.passwordResetExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
+        user.passwordResetAttempts = 0;
+        await user.save();
+        try {
+          await passwordResetEmail.sendCode({ email: user.email, code });
+        } catch (error) {
+            console.error('Password reset email delivery failed', {
+              requestId: request.id,
+              code: error.code || 'SMTP_ERROR',
+            });
+            user.passwordResetTokenHash = undefined;
+          user.passwordResetExpiresAt = undefined;
+          await user.save();
+          throw new ApiError(503, 'Could not send the reset code. Please try again later.');
+        }
+      }
+      response.status(202).json({
+        data: { message: 'If that email belongs to an account, a reset code has been sent.' },
+      });
+    }),
+  );
+
+  router.post(
+    '/password-reset/confirm',
+    passwordResetLimiter,
+    asyncHandler(async (request, response) => {
+      const input = passwordResetConfirmSchema.parse(request.body);
+      const now = new Date();
+      const user = await User.findOne({
+        email: input.email,
+        passwordResetTokenHash: hashResetCode(input.code),
+        passwordResetExpiresAt: { $gt: now },
+        passwordResetAttempts: { $lt: 5 },
+      }).select('+passwordHash +passwordResetTokenHash +passwordResetExpiresAt +passwordResetAttempts');
+      if (!user) {
+        await User.updateOne(
+          {
+            email: input.email,
+            passwordResetExpiresAt: { $gt: now },
+            passwordResetAttempts: { $lt: 5 },
+          },
+          { $inc: { passwordResetAttempts: 1 } },
+        );
+        throw new ApiError(400, 'Reset code is invalid or expired');
+      }
+      const passwordHash = await hashPassword(input.password);
+      const update = await User.updateOne(
+        {
+          _id: user.id,
+          passwordResetTokenHash: hashResetCode(input.code),
+          passwordResetExpiresAt: { $gt: now },
+          passwordResetAttempts: { $lt: 5 },
+        },
+        {
+          $set: {
+            passwordHash,
+            passwordResetTokenHash: null,
+            passwordResetExpiresAt: null,
+            passwordResetAttempts: 0,
+          },
+          $inc: { tokenVersion: 1 },
+        },
+      );
+      if (update.modifiedCount !== 1) {
+        throw new ApiError(400, 'Reset code is invalid or expired');
+      }
+      response.json({
+        data: { message: 'Password reset. Sign in with your new password.' },
+      });
     }),
   );
 
@@ -79,6 +200,18 @@ function createAuthRouter({ env, requireAuth, authLimiter }) {
   );
 
   return router;
+}
+
+function signAccessToken(user, env) {
+  return jwt.sign(
+    { sub: user.id, role: user.role, ver: user.tokenVersion ?? 0 },
+    env.JWT_SECRET,
+    { expiresIn: env.JWT_EXPIRES_IN, issuer: 'eko-store-api', audience: 'eko-store-app' },
+  );
+}
+
+function hashResetCode(code) {
+  return crypto.createHash('sha256').update(code).digest('hex');
 }
 
 module.exports = { createAuthRouter, publicUser };

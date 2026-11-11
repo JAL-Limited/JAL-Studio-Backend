@@ -22,6 +22,10 @@ const userSchema = new mongoose.Schema(
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
     phone: { type: String, trim: true, maxlength: 30 },
     passwordHash: { type: String, required: true, select: false },
+    tokenVersion: { type: Number, default: 0 },
+    passwordResetTokenHash: { type: String, select: false },
+    passwordResetExpiresAt: { type: Date, select: false },
+    passwordResetAttempts: { type: Number, default: 0, select: false },
     role: { type: String, enum: ['customer', 'seller', 'admin'], default: 'customer' },
     sellerApplication: {
       businessName: { type: String, trim: true, maxlength: 120 },

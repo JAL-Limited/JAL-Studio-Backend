@@ -43,6 +43,23 @@ flutter run --dart-define=API_BASE_URL=http://10.0.2.2:4000/api/v1
 
 The web development app uses `http://localhost:4000/api/v1`.
 
+## Password and account security
+
+The API hashes passwords with scrypt. Authenticated users can change their
+password by providing the current password; doing so revokes all other access
+tokens for that account. Password reset uses a cryptographically random,
+one-time code that expires after 15 minutes. Codes are stored only as SHA-256
+hashes, limited to five failed attempts, and emailed through optional SMTP.
+Configure `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`,
+and `SMTP_FROM` in the hosting secret manager to enable reset requests. Without
+all four required SMTP values, the API responds that password reset delivery
+is unavailable rather than pretending an email was sent. Reset requests are
+rate-limited separately from other authentication routes.
+
+The Flutter app can optionally use device Face ID or fingerprint to unlock an
+existing saved session. Biometric templates never leave the device; biometrics
+gate the locally stored session token and are not sent to the API.
+
 ## Paystack test setup
 
 1. Create/sign in to your Paystack business dashboard and use **test mode**.

@@ -19,6 +19,7 @@ const { createMediaRouter } = require('./routes/media');
 const { createPaystackService } = require('./services/paystack');
 const { createSellerRouter } = require('./routes/seller');
 const { createSupportRouter } = require('./routes/support');
+const { createPasswordResetEmailService } = require('./services/password-reset-email');
 
 function createApp(options = {}) {
   const env = options.env || getEnv();
@@ -52,6 +53,8 @@ function createApp(options = {}) {
     },
   }));
   const paystack = options.paystack || createPaystackService(env, options.fetchImpl);
+  const passwordResetEmail = options.passwordResetEmail
+    || createPasswordResetEmailService(env);
   app.use('/api/v1/payments', express.raw({ type: 'application/json', limit: '32kb' }));
   app.use(
     '/api/v1/payments',
@@ -84,10 +87,25 @@ function createApp(options = {}) {
     standardHeaders: 'draft-7',
     legacyHeaders: false,
   });
+  const passwordResetLimiter = rateLimit({
+    windowMs: env.API_RATE_LIMIT_WINDOW_MS,
+    limit: 5,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+  });
   const { requireAuth, requireRole } = createAuthMiddleware(env);
   app.use('/api/v1', apiLimiter);
   app.use('/api/v1/media', createMediaRouter());
-  app.use('/api/v1/auth', createAuthRouter({ env, requireAuth, authLimiter }));
+  app.use(
+    '/api/v1/auth',
+    createAuthRouter({
+      env,
+      requireAuth,
+      authLimiter,
+      passwordResetLimiter,
+      passwordResetEmail,
+    }),
+  );
   app.use('/api/v1', createReviewsRouter({ requireAuth }));
   app.use('/api/v1/products', createProductsRouter({ requireAuth, requireRole }));
   app.use('/api/v1/account', createAccountRouter({ requireAuth }));

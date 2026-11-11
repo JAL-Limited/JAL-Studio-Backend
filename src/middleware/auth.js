@@ -15,6 +15,9 @@ function createAuthMiddleware(env) {
       }
       const user = await User.findById(claims.sub);
       if (!user) throw new ApiError(401, 'Account no longer exists');
+      if ((claims.ver ?? 0) !== user.tokenVersion) {
+        throw new ApiError(401, 'Your session has expired. Sign in again.');
+      }
       request.user = user;
       next();
     } catch (error) {

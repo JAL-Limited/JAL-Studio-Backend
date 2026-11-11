@@ -15,11 +15,19 @@ process.env.MONGODB_URI = 'mongodb://127.0.0.1:27017/eko_test';
 
 let mongo;
 let app;
+const sentPasswordResetCodes = [];
 
 before(async () => {
   mongo = await MongoMemoryServer.create();
   await connectDatabase(mongo.getUri());
-  app = createApp();
+  app = createApp({
+    passwordResetEmail: {
+      isConfigured: true,
+      async sendCode(message) {
+        sentPasswordResetCodes.push(message);
+      },
+    },
+  });
 });
 
 after(async () => {
@@ -240,6 +248,153 @@ test('registration, authentication, and server-priced cart operations work', asy
     password: 'wrong-password-123',
   });
   assert.equal(login.status, 401);
+});
+
+test('password changes require the current password and revoke previous sessions', async () => {
+  const registration = await request(app).post('/api/v1/auth/register').send({
+    fullName: 'Security Customer',
+    email: 'security-customer@example.com',
+    password: 'a-secure-test-password',
+  });
+  const oldToken = registration.body.data.token;
+
+  const rejected = await request(app)
+    .post('/api/v1/auth/password')
+    .set('Authorization', `Bearer ${oldToken}`)
+    .send({
+      currentPassword: 'wrong-current-password',
+      newPassword: 'an-even-better-password',
+    });
+  assert.equal(rejected.status, 400);
+
+  const changed = await request(app)
+    .post('/api/v1/auth/password')
+    .set('Authorization', `Bearer ${oldToken}`)
+    .send({
+      currentPassword: 'a-secure-test-password',
+      newPassword: 'an-even-better-password',
+    });
+  assert.equal(changed.status, 200);
+  const newToken = changed.body.data.token;
+  assert.equal(
+    (await request(app).get('/api/v1/auth/me').set('Authorization', `Bearer ${oldToken}`)).status,
+    401,
+  );
+  assert.equal(
+    (await request(app).get('/api/v1/auth/me').set('Authorization', `Bearer ${newToken}`)).status,
+    200,
+  );
+  assert.equal(
+    (await request(app).post('/api/v1/auth/login').send({
+      email: 'security-customer@example.com',
+      password: 'a-secure-test-password',
+    })).status,
+    401,
+  );
+  assert.equal(
+    (await request(app).post('/api/v1/auth/login').send({
+      email: 'security-customer@example.com',
+      password: 'an-even-better-password',
+    })).status,
+    200,
+  );
+});
+
+test('password reset codes are emailed, expire, are single-use, and revoke sessions', async () => {
+  const registration = await request(app).post('/api/v1/auth/register').send({
+    fullName: 'Reset Customer',
+    email: 'reset-customer@example.com',
+    password: 'a-secure-test-password',
+  });
+  const oldToken = registration.body.data.token;
+  const previousMailCount = sentPasswordResetCodes.length;
+
+  const requested = await request(app)
+    .post('/api/v1/auth/password-reset/request')
+    .send({ email: 'reset-customer@example.com' });
+  assert.equal(requested.status, 202);
+  assert.equal(sentPasswordResetCodes.length, previousMailCount + 1);
+  const resetCode = sentPasswordResetCodes.at(-1).code;
+
+  const invalid = await request(app)
+    .post('/api/v1/auth/password-reset/confirm')
+    .send({
+      email: 'reset-customer@example.com',
+      code: 'not-the-reset-code-123456',
+      password: 'another-secure-password',
+    });
+  assert.equal(invalid.status, 400);
+
+  const reset = await request(app)
+    .post('/api/v1/auth/password-reset/confirm')
+    .send({
+      email: 'reset-customer@example.com',
+      code: resetCode,
+      password: 'another-secure-password',
+    });
+  assert.equal(reset.status, 200);
+  assert.equal(
+    (await request(app).get('/api/v1/auth/me').set('Authorization', `Bearer ${oldToken}`)).status,
+    401,
+  );
+  assert.equal(
+    (await request(app).post('/api/v1/auth/password-reset/confirm').send({
+      email: 'reset-customer@example.com',
+      code: resetCode,
+      password: 'replayed-reset-password',
+    })).status,
+    400,
+  );
+  assert.equal(
+    (await request(app).post('/api/v1/auth/login').send({
+      email: 'reset-customer@example.com',
+      password: 'another-secure-password',
+    })).status,
+    200,
+  );
+  assert.equal(sentPasswordResetCodes.at(-1).email, 'reset-customer@example.com');
+});
+
+test('password reset is unavailable when server email delivery is not configured', async () => {
+  const unconfiguredApp = createApp();
+  const response = await request(unconfiguredApp)
+    .post('/api/v1/auth/password-reset/request')
+    .send({ email: 'anyone@example.com' });
+  assert.equal(response.status, 503);
+});
+
+test('password reset codes that have expired cannot be used', async () => {
+  const resetCodes = [];
+  const resetApp = createApp({
+    passwordResetEmail: {
+      isConfigured: true,
+      async sendCode(message) {
+        resetCodes.push(message);
+      },
+    },
+  });
+  const registration = await request(resetApp).post('/api/v1/auth/register').send({
+    fullName: 'Expired Reset Customer',
+    email: 'expired-reset@example.com',
+    password: 'a-secure-test-password',
+  });
+  assert.equal(registration.status, 201);
+  const requested = await request(resetApp)
+    .post('/api/v1/auth/password-reset/request')
+    .send({ email: 'expired-reset@example.com' });
+  assert.equal(requested.status, 202);
+  await User.updateOne(
+    { email: 'expired-reset@example.com' },
+    { $set: { passwordResetExpiresAt: new Date(Date.now() - 1000) } },
+  );
+  const response = await request(resetApp)
+    .post('/api/v1/auth/password-reset/confirm')
+    .send({
+      email: 'expired-reset@example.com',
+      code: resetCodes[0].code,
+      password: 'another-secure-password',
+    });
+  assert.equal(response.status, 400);
 });
 
 test('checkout rejects a missing saved address and never reports a payment as completed', async () => {
