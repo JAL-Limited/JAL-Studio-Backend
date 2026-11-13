@@ -16,6 +16,7 @@ const envSchema = z.object({
   SMTP_USER: z.string().trim().min(1).optional(),
   SMTP_PASS: z.string().min(1).optional(),
   SMTP_FROM: z.string().trim().min(1).optional(),
+  GOOGLE_CLIENT_ID: z.string().trim().min(1).optional(),
   PAYSTACK_SECRET_KEY: z.string().optional(),
   PAYSTACK_CALLBACK_URL: z.string().url().default('https://standard.paystack.co/close'),
   CORS_ORIGINS: z.string().default('http://localhost:3000,http://localhost:8080,http://localhost:8765'),

@@ -20,6 +20,7 @@ const { createPaystackService } = require('./services/paystack');
 const { createSellerRouter } = require('./routes/seller');
 const { createSupportRouter } = require('./routes/support');
 const { createPasswordResetEmailService } = require('./services/password-reset-email');
+const { createGoogleAuthService } = require('./services/google-auth');
 
 function createApp(options = {}) {
   const env = options.env || getEnv();
@@ -55,6 +56,7 @@ function createApp(options = {}) {
   const paystack = options.paystack || createPaystackService(env, options.fetchImpl);
   const passwordResetEmail = options.passwordResetEmail
     || createPasswordResetEmailService(env);
+  const googleAuth = options.googleAuth || createGoogleAuthService(env);
   app.use('/api/v1/payments', express.raw({ type: 'application/json', limit: '32kb' }));
   app.use(
     '/api/v1/payments',
@@ -104,6 +106,7 @@ function createApp(options = {}) {
       authLimiter,
       passwordResetLimiter,
       passwordResetEmail,
+      googleAuth,
     }),
   );
   app.use('/api/v1', createReviewsRouter({ requireAuth }));

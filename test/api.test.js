@@ -47,6 +47,63 @@ test('checkout config shares the server delivery fee with the app', async () => 
   assert.equal(response.body.data.deliveryKobo, 1500000);
 });
 
+test('Google sign-in verifies email and creates a passwordless customer session', async () => {
+  const googleApp = createApp({
+    googleAuth: {
+      isConfigured: true,
+      async verifyIdToken(idToken) {
+        assert.equal(idToken, 'verified-google-id-token');
+        return {
+          email: 'google-customer@example.com',
+          email_verified: true,
+          name: 'Google Customer',
+        };
+      },
+    },
+  });
+  const response = await request(googleApp)
+    .post('/api/v1/auth/google')
+    .send({ idToken: 'verified-google-id-token' });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.data.user.email, 'google-customer@example.com');
+  assert.equal(response.body.data.user.fullName, 'Google Customer');
+  assert.ok(response.body.data.token);
+  const user = await User.findOne({ email: 'google-customer@example.com' })
+    .select('+passwordHash');
+  assert.equal(user.passwordHash, undefined);
+  const passwordLogin = await request(googleApp)
+    .post('/api/v1/auth/login')
+    .send({
+      email: 'google-customer@example.com',
+      password: 'a-secure-test-password',
+    });
+  assert.equal(passwordLogin.status, 401);
+});
+
+test('Google sign-in rejects unverified identities and missing configuration', async () => {
+  const googleApp = createApp({
+    googleAuth: {
+      isConfigured: true,
+      async verifyIdToken() {
+        return { email: 'unverified@example.com', email_verified: false };
+      },
+    },
+  });
+  const unverified = await request(googleApp)
+    .post('/api/v1/auth/google')
+    .send({ idToken: 'verified-google-id-token' });
+  assert.equal(unverified.status, 401);
+
+  const unconfiguredApp = createApp({
+    googleAuth: { isConfigured: false },
+  });
+  const unconfigured = await request(unconfiguredApp)
+    .post('/api/v1/auth/google')
+    .send({ idToken: 'verified-google-id-token' });
+  assert.equal(unconfigured.status, 503);
+});
+
 test('CORS allows configured app origins and withholds headers from other sites', async () => {
   const allowed = await request(app)
     .get('/api/v1/health')

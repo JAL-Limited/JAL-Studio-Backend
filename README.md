@@ -18,7 +18,8 @@ required values are:
 
 - `MONGODB_URI`: local or Atlas connection string; percent-encode special
   characters in a MongoDB username/password.
-- `JWT_SECRET`: generate a private random secret of at least 32 characters.
+- `JWT_SECRET`: generate a private random secret of at least 32 characters,
+  for example with `node -e "console.log(require('node:crypto').randomBytes(48).toString('base64url'))"`.
 - `PAYSTACK_SECRET_KEY`: Paystack **test secret key** (`sk_test_...`) for
   local test transactions. Keep it on this Node server only.
 - `CORS_ORIGINS`: comma-separated allowed web origins. Native Flutter apps do
@@ -55,6 +56,96 @@ and `SMTP_FROM` in the hosting secret manager to enable reset requests. Without
 all four required SMTP values, the API responds that password reset delivery
 is unavailable rather than pretending an email was sent. Reset requests are
 rate-limited separately from other authentication routes.
+
+### Configure Gmail SMTP for password reset
+
+For a personal Gmail account:
+
+1. Turn on 2-Step Verification for the Google account that will send JAL Studio
+   email.
+2. In that account's Google Account security settings, create an **App
+   Password**. Use it as `SMTP_PASS`; do not use your normal Google password.
+   If Google does not offer App Passwords for the account, use an SMTP provider
+   that issues an app-specific SMTP credential.
+3. Add these values to the backend `.env` for local testing:
+
+   ```dotenv
+   SMTP_HOST=smtp.gmail.com
+   SMTP_PORT=587
+   SMTP_SECURE=false
+   SMTP_USER=your-sending-account@gmail.com
+   SMTP_PASS=your-16-character-app-password
+   SMTP_FROM=JAL Studio <your-sending-account@gmail.com>
+   ```
+
+4. On Render, open the backend service's **Environment** settings and add the
+   same six variables there. Save and redeploy. Keep the app password only in
+   the backend secret settings and a local, ignored `.env`; never add it to
+   Flutter, source control, or chat.
+5. Test password reset using an account whose mailbox you can access. Gmail has
+   sending limits; for production/high volume, use a transactional email
+   provider and its SMTP host, port, username, and password instead.
+
+### Configure Google sign-in
+
+Google sign-in is implemented for Android and iOS. The app sends a Google ID
+token to the API, and the API verifies the token's signature, audience, and
+expiry with Google before creating/signing into a customer account. The app does
+not send or need an OAuth client secret.
+
+1. In [Google Cloud Console](https://console.cloud.google.com/), create/select a
+   project and configure the OAuth consent screen. Set the app name and support
+   email. While the consent screen is in **Testing**, add the Google accounts
+   that should be allowed to sign in as test users; publish it when ready for
+   public sign-in.
+2. Create a **Web application** OAuth client ID. This is the server/audience
+   client ID. Add it as `GOOGLE_CLIENT_ID` in the backend `.env` and Render
+   Environment settings. The client ID ends in
+   `.apps.googleusercontent.com`; it is not a password or client secret.
+3. In Google Cloud Console, create an **Android** OAuth client with package
+   name `com.jalstudio.jal_studio` and the SHA-1 certificate fingerprints for
+   the Android signing keys you use. For local debug builds, get the SHA-1
+   with `Push-Location android; .\gradlew signingReport; Pop-Location`.
+   Register the production
+   release-signing certificate fingerprint separately.
+4. Create an **iOS** OAuth client with bundle ID `com.jalstudio.jalStudio`.
+   Copy its client ID and its reversed client ID from the Google configuration.
+   Add the iOS client ID under `CFBundleURLTypes` > `CFBundleURLSchemes` in
+   `ios/Runner/Info.plist` using that reversed client ID. This URL scheme is
+   required for the iOS sign-in callback.
+5. Build the Flutter app with the web client ID as the server client ID, and
+   supply the iOS client ID for iOS builds:
+
+   ```powershell
+   flutter run `
+     --dart-define=API_BASE_URL=http://10.0.2.2:4000/api/v1 `
+     --dart-define=GOOGLE_SERVER_CLIENT_ID=your-web-client-id.apps.googleusercontent.com `
+     --dart-define=GOOGLE_IOS_CLIENT_ID=your-ios-client-id.apps.googleusercontent.com
+   ```
+
+   For a release APK, use the production API URL for `API_BASE_URL` and the
+   same `GOOGLE_SERVER_CLIENT_ID`. These client IDs are public app
+   configuration, not secrets. The backend still requires the matching
+   `GOOGLE_CLIENT_ID` environment variable; sign-in returns an explicit
+   configuration error until it is set and deployed.
+6. Test with one registered account on both platforms. Verify both a new Google
+   account and a Google email that already has a JAL account; existing account
+   roles and marketplace data are retained.
+
+### Production environment variable checklist
+
+- Required: `MONGODB_URI`, `JWT_SECRET`.
+- Password reset email: `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`,
+  `SMTP_PASS`, `SMTP_FROM`.
+- Google sign-in: `GOOGLE_CLIENT_ID` on the API. The Flutter build also needs
+  `GOOGLE_SERVER_CLIENT_ID`; iOS additionally needs
+  `GOOGLE_IOS_CLIENT_ID` and the reversed-client-ID URL scheme.
+- Paystack checkout: `PAYSTACK_SECRET_KEY` and `PAYSTACK_CALLBACK_URL`.
+- Optional operations: `CORS_ORIGINS`, `DELIVERY_FEE_KOBO`, rate-limit settings.
+
+Never put `JWT_SECRET`, SMTP passwords, MongoDB credentials, or Paystack secret
+keys in Flutter `--dart-define` values or app source. Store backend secrets in
+Render's Environment settings and change them there if they are ever exposed.
 
 The Flutter app can optionally use device Face ID or fingerprint to unlock an
 existing saved session. Biometric templates never leave the device; biometrics

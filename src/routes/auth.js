@@ -25,6 +25,9 @@ const registerSchema = z.object({
   phone: z.string().trim().max(30).optional(),
 });
 const loginSchema = z.object({ email, password: z.string().min(1).max(128) });
+const googleSignInSchema = z.object({
+  idToken: z.string().trim().min(20).max(8192),
+}).strict();
 
 function publicUser(user) {
   return {
@@ -46,6 +49,7 @@ function createAuthRouter({
   authLimiter,
   passwordResetLimiter,
   passwordResetEmail,
+  googleAuth,
 }) {
   const router = Router();
 
@@ -72,8 +76,45 @@ function createAuthRouter({
     asyncHandler(async (request, response) => {
       const input = loginSchema.parse(request.body);
       const user = await User.findOne({ email: input.email }).select('+passwordHash');
-      const isValid = user && (await verifyPassword(input.password, user.passwordHash));
+      const isValid = user?.passwordHash
+        && (await verifyPassword(input.password, user.passwordHash));
       if (!isValid) throw new ApiError(401, 'Email or password is incorrect');
+      const token = signAccessToken(user, env);
+      response.json({ data: { user: publicUser(user), token } });
+    }),
+  );
+
+  router.post(
+    '/google',
+    authLimiter,
+    asyncHandler(async (request, response) => {
+      if (!googleAuth?.isConfigured) {
+        throw new ApiError(503, 'Google sign-in is not configured on the server');
+      }
+      const { idToken } = googleSignInSchema.parse(request.body);
+      let identity;
+      try {
+        identity = await googleAuth.verifyIdToken(idToken);
+      } catch {
+        throw new ApiError(401, 'Google sign-in token is invalid or expired');
+      }
+      const verifiedEmail = typeof identity?.email === 'string'
+        ? identity.email.trim().toLowerCase()
+        : '';
+      if (
+        identity?.email_verified !== true
+        || !email.safeParse(verifiedEmail).success
+      ) {
+        throw new ApiError(401, 'Google account must have a verified email address');
+      }
+
+      let user = await User.findOne({ email: verifiedEmail });
+      if (!user) {
+        const fullName = typeof identity.name === 'string' && identity.name.trim()
+          ? identity.name.trim().slice(0, 100)
+          : verifiedEmail.split('@')[0].slice(0, 100);
+        user = await User.create({ fullName, email: verifiedEmail });
+      }
       const token = signAccessToken(user, env);
       response.json({ data: { user: publicUser(user), token } });
     }),
@@ -89,7 +130,11 @@ function createAuthRouter({
         throw new ApiError(400, 'Choose a new password different from your current one');
       }
       const user = await User.findById(request.user.id).select('+passwordHash');
-      if (!user || !(await verifyPassword(input.currentPassword, user.passwordHash))) {
+      if (
+        !user
+        || !user.passwordHash
+        || !(await verifyPassword(input.currentPassword, user.passwordHash))
+      ) {
         throw new ApiError(400, 'Current password is incorrect');
       }
       user.passwordHash = await hashPassword(input.newPassword);

@@ -21,7 +21,7 @@ const userSchema = new mongoose.Schema(
     fullName: { type: String, required: true, trim: true, maxlength: 100 },
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
     phone: { type: String, trim: true, maxlength: 30 },
-    passwordHash: { type: String, required: true, select: false },
+    passwordHash: { type: String, select: false },
     tokenVersion: { type: Number, default: 0 },
     passwordResetTokenHash: { type: String, select: false },
     passwordResetExpiresAt: { type: Date, select: false },
